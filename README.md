@@ -11,7 +11,9 @@ employee-scheduler/
 │  ├─ lib/api.ts           Supabase reads/writes
 │  ├─ pages/               Schedule, Employees, Time off, Store setup, Login
 │  └─ styles.css
-└─ test/scheduler.test.ts  engine tests against the seed data
+├─ test/scheduler.test.ts  engine tests against the seed data
+├─ .github/workflows/pipeline.yml   CI/CD (verify → staging / production)
+└─ docs/DEPLOYMENT.md      pipeline, secrets, setup checklist
 ```
 
 ## Recommended stack & hosting (lowest cost)
@@ -56,12 +58,10 @@ people in well under a second in the browser.
    npm install
    npm run dev
    ```
-5. **Deploy to Cloudflare Pages.** Push this repo to GitHub, then Cloudflare
-   dashboard → Workers & Pages → Create → Pages → connect the repo.
-   - Build command: `npm run build` · Output directory: `dist`
-   - Environment variables: `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`
-   - In Supabase → Authentication → URL Configuration, add your `*.pages.dev`
-     URL so magic-link sign-in redirects work.
+5. **Deploy.** Deploys run through GitHub Actions: pushing to `staging`
+   publishes a test site, and merging to `main` publishes production after
+   your approval. See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for setup
+   and for where every secret is stored.
 
 ## Data model
 

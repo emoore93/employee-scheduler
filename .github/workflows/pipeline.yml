@@ -1,0 +1,155 @@
+# CI/CD for Shift Planner
+#
+#   pull request -> verify only (no secrets are available to this job)
+#   push staging -> verify -> deploy to the "staging" environment  -> https://staging.<project>.pages.dev
+#   push main    -> verify -> deploy to the "production" environment (approval required) -> https://<project>.pages.dev
+#
+# Secrets live in GitHub *Environments* (Settings -> Environments), never in the repo.
+# See docs/DEPLOYMENT.md for the full setup and the reasoning behind each choice.
+#
+# Third-party actions are pinned to full commit SHAs (tags can be moved; SHAs can't).
+# Dependabot (.github/dependabot.yml) opens PRs to bump them.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main, staging]
+  workflow_dispatch:
+
+# Start from zero token permissions; each job asks only for what it needs.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: Type-check, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Install dependencies (no secrets in scope)
+        id: install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit --no-fund
+          else
+            echo "::warning title=No package-lock.json::Dependency versions are not locked. Commit package-lock.json (download the 'package-lock' artifact from this run, or run npm install locally). Deploys are blocked until you do."
+            npm install --ignore-scripts --no-audit --no-fund
+            echo "generated=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Unit tests (auto-scheduler)
+        run: npm test
+
+      - name: Build with placeholder config
+        # Proves the bundle builds. Real values are injected only in the deploy job.
+        env:
+          VITE_SUPABASE_URL: https://ci-placeholder.supabase.co
+          VITE_SUPABASE_ANON_KEY: ci-placeholder
+        run: npx vite build
+
+      - name: Upload generated lockfile
+        if: steps.install.outputs.generated == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-lock
+          path: package-lock.json
+          retention-days: 7
+
+  deploy:
+    name: Deploy (${{ github.ref_name == 'main' && 'production' || 'staging' }})
+    needs: verify
+    # Only real pushes to main/staging deploy, and only once the repo is configured.
+    if: github.event_name == 'push' && vars.CLOUDFLARE_PAGES_PROJECT != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    environment:
+      name: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+      url: ${{ steps.deploy.outputs.pages-deployment-alias-url || steps.deploy.outputs.deployment-url }}
+    concurrency:
+      group: deploy-${{ github.ref_name }}
+      cancel-in-progress: false
+    env:
+      DEPLOY_ENV: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          # No dependency cache on deploys: install fresh from the lockfile.
+
+      - name: Require a lockfile
+        run: |
+          if [ ! -f package-lock.json ]; then
+            echo "::error title=No package-lock.json::Refusing to deploy with unpinned dependencies. Commit package-lock.json first."
+            exit 1
+          fi
+
+      - name: Install dependencies (no secrets in scope)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Check configuration
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          HAS_CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: node scripts/check-deploy-config.mjs
+
+      - name: Build
+        # Secrets are mapped into env for this step only. Vite inlines VITE_* values
+        # into the bundle at build time; nothing is written to disk as a .env file.
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: npm run build
+
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        # The Cloudflare token is visible to this step only.
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=${{ vars.CLOUDFLARE_PAGES_PROJECT }} --branch=${{ github.ref_name }} --commit-hash=${{ github.sha }} --commit-dirty=true
+
+      - name: Summary
+        env:
+          ALIAS_URL: ${{ steps.deploy.outputs.pages-deployment-alias-url }}
+          DEPLOY_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: |
+          {
+            echo "### Deployed to $DEPLOY_ENV"
+            [ -n "$ALIAS_URL" ] && echo "- Branch URL: $ALIAS_URL"
+            [ -n "$DEPLOY_URL" ] && echo "- This deployment: $DEPLOY_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
