@@ -29,7 +29,7 @@ The workflow is `.github/workflows/pipeline.yml`:
 | `VITE_SUPABASE_URL` | Variable | GitHub → Environments → each env | Public | Build step |
 | `CLOUDFLARE_ACCOUNT_ID` | Variable | GitHub → Environments → each env | Not secret (an ID) | Deploy step |
 | `CLOUDFLARE_PAGES_PROJECT` | Variable | GitHub → repo-level **Variables** | Public | Turns deploys on |
-| Supabase `service_role` / `sb_secret_…` key, DB password | **Never in GitHub, never in the front end** | Your password manager | **Critical.** Bypasses all security | Nothing in this repo |
+| Supabase `service_role` / `sb_secret_…` key, DB password | **Never in GitHub, never in the front end** | Your password manager. The invite Edge Function gets the key from Supabase itself | **Critical.** Bypasses all security | Only the `invite-user` function, inside Supabase |
 | Local dev values | `.env` file on your machine (ignored by git) | Your laptop only | Use **staging** values only | `npm run dev` |
 
 Rules:
@@ -90,12 +90,26 @@ dependencies are a supply-chain risk.
 
 ### b) Two Supabase projects
 1. Create `shift-planner-staging` and `shift-planner-prod`. The free plan allows two.
-2. Run the schema migration in both. Run the **seed only in staging**.
-3. In each: **Authentication → Sign In / Providers →** turn off new sign-ups.
-4. In each: **Authentication → URL Configuration →** set Site URL to that
-   environment's address (`https://staging.<project>.pages.dev` or
-   `https://<project>.pages.dev`).
-5. Note each project's URL and anon/publishable key (**Project Settings → API**).
+2. In **both**, run the SQL migrations in order: `…_schema.sql`, then
+   `…_roles.sql`. Run the **seed only in staging**.
+3. **Authentication → Sign In / Providers → Email:** turn off "Allow new
+   users to sign up". Set minimum password length to **12**.
+4. **Authentication → URL Configuration:** Site URL = that environment's
+   address. Under Redirect URLs, add the same address (plus
+   `http://localhost:5173` in staging only).
+5. **Deploy the invite function** to each project (needs the Supabase CLI):
+   ```bash
+   supabase link --project-ref <ref>
+   supabase functions deploy invite-user
+   supabase secrets set ALLOWED_ORIGINS="https://staging.<project>.pages.dev"   # prod: https://<project>.pages.dev
+   ```
+   The function gets the service-role key from Supabase automatically. It
+   never touches GitHub or the browser.
+6. **Make yourself admin.** Invite yourself from **Authentication → Users →
+   Invite user**, accept the email, then run this in the SQL Editor:
+   `update public.app_users set role = 'admin' where email = 'you@example.com';`
+   From then on, invite everyone else from the app's **Users** tab.
+7. Note each project's URL and anon/publishable key (**Project Settings → API**).
 
 ### c) Cloudflare Pages project
 1. Create the project once with production branch `main`. Either:
@@ -106,6 +120,13 @@ dependencies are a supply-chain risk.
    policy**. Because `main` is the production branch, `staging` counts as a
    preview. Its URL now requires a Cloudflare sign-in. Add teammates' emails
    to the Access policy if others need to test.
+3. **Lock down production too:** Zero Trust → **Access → Applications → Add
+   an application → Self-hosted**. Set the domain to `<project>.pages.dev`
+   (and your custom domain, if you add one). Add an **Allow** policy with
+   **Emails** = your managers' addresses, and login method **One-time PIN**.
+   Then go back to the Pages project → Settings → General and select **Enable
+   access policy** again, so previews stay covered. This is free for up to 50
+   users.
 
 ### d) Cloudflare API token (least privilege)
 **My Profile → API Tokens → Create Token → Custom token**
@@ -156,7 +177,32 @@ exists, the pipeline only verifies and never deploys.
 
 ---
 
-## 5. Day to day
+## 5. Who can do what
+
+Two separate locks, both free:
+
+| Layer | Decides | Managed in |
+|---|---|---|
+| Cloudflare Access | Who can load the site at all | Zero Trust → Access → your app's policy (email list) |
+| Supabase Auth + `app_users` | Who can sign in, and their role | App → **Users** tab (admins) |
+
+| Role | Can |
+|---|---|
+| admin | Everything, plus invite people, change roles, remove access |
+| manager | Build/publish schedules; edit employees, time off, store setup |
+| viewer | See published schedules only. Can't see the "keep apart" list |
+
+Roles are enforced by Row Level Security in Postgres. The UI just hides
+buttons, but the database refuses the write regardless. New accounts start as
+**viewer**. Only an admin can promote someone, and the last admin can't be
+demoted or removed. A role a user claims in their own profile data is
+ignored.
+
+When someone leaves: **Users → Remove access** (instant), take them off the
+Cloudflare Access email list, and optionally delete their login under
+Supabase → Authentication → Users.
+
+## 6. Day to day
 
 1. Push to `staging`. After about 2 minutes, test at
    `https://staging.<project>.pages.dev`.
@@ -167,7 +213,7 @@ exists, the pipeline only verifies and never deploys.
    earlier production deployment → **Rollback**. You can also `git revert` and
    merge.
 
-## 6. If a secret leaks
+## 7. If a secret leaks
 
 - **Cloudflare token:** revoke it in Cloudflare (My Profile → API Tokens),
   create a new one, and update it in both GitHub environments. Then check the
@@ -178,7 +224,7 @@ exists, the pipeline only verifies and never deploys.
 - **Anon key:** low impact. Rotate if you like, update the environment secret,
   and redeploy.
 
-## 7. Later: database migrations in the pipeline
+## 8. Later: database migrations in the pipeline
 Pushing schema changes from CI needs more powerful credentials: a Supabase
 access token and the database password. If you add that, put them in the
 same environments as **secrets**, use them in a separate job that requires
