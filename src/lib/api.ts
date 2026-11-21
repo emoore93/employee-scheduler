@@ -1,6 +1,6 @@
 import { supabase, must } from './supabase';
 import type {
-  Availability, Conflict, Employee, Schedule, Shift, StaffingRequirement,
+  AppRole, AppUser, Availability, Conflict, Employee, Schedule, Shift, StaffingRequirement,
   Store, StoreHourException, StoreHours, TimeOff,
 } from './types';
 import { addDays, type SchedulerInput } from './scheduler';
@@ -110,3 +110,38 @@ export async function deleteRow(table: Table, id: string) {
 }
 
 export const weekDates = (weekStart: string) => [0, 1, 2, 3, 4, 5, 6].map(i => addDays(weekStart, i));
+
+// ---- roles & users ---------------------------------------------------------------
+/** The signed-in user's role, or null if they have no access. */
+export async function getMyRole(): Promise<AppRole | null> {
+  const role = must(await supabase.rpc('app_role')) as AppRole | null;
+  return role ?? null;
+}
+
+export async function listAppUsers(): Promise<AppUser[]> {
+  return must(await supabase.from('app_users').select('*').order('email'));
+}
+
+export async function setUserRole(userId: string, role: AppRole) {
+  must(await supabase.from('app_users').update({ role }).eq('user_id', userId));
+}
+
+/** Removes app access. Their login still exists but sees nothing (delete it in Supabase if needed). */
+export async function removeAppUser(userId: string) {
+  must(await supabase.from('app_users').delete().eq('user_id', userId));
+}
+
+/** Sends an invite email via the invite-user Edge Function (admins only). */
+export async function inviteUser(email: string, role: AppRole) {
+  const { data, error } = await supabase.functions.invoke('invite-user', { body: { email, role } });
+  if (error) {
+    // Surface the function's own error message when there is one
+    let msg = error.message;
+    try {
+      const ctx = (error as { context?: Response }).context;
+      if (ctx) msg = ((await ctx.json()) as { error?: string }).error ?? msg;
+    } catch { /* keep generic message */ }
+    throw new Error(msg);
+  }
+  return data as { ok: boolean; user_id: string };
+}

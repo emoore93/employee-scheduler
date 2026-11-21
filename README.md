@@ -49,9 +49,10 @@ people in well under a second in the browser.
    migration and then the seed file. (These SQL files are kept separately
    from this front-end repo.) The seed can be re-run at any time: it wipes and
    rebuilds the demo store.
-3. **Lock down sign-ups.** Authentication → Sign In / Providers → turn off
-   "Allow new users to sign up". Then Authentication → Users → *Invite user*
-   for each manager. (In v1, every signed-in user is a manager with full access.)
+3. **Accounts and roles.** Turn off public sign-ups, deploy the `invite-user`
+   function, and make yourself admin. Everyone else gets invited from the
+   app's **Users** tab. Steps and the role table are in
+   [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 4. **Run locally**
    ```bash
    cp .env.example .env      # paste Project URL + anon key from Settings → API
