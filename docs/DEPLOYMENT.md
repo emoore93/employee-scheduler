@@ -4,9 +4,11 @@ How code gets from a push to a live URL, where every secret is kept, and how
 the build picks them up.
 
 ```
- push to staging ─► verify ─► deploy (env: staging) ─────────────► https://staging.<project>.pages.dev  (sign-in required via Cloudflare Access)
+ push to staging ─► verify ─► deploy (env: staging) ─────────────► https://shift-planner-staging.<subdomain>.workers.dev
  PR staging→main ─► verify
- merge to main   ─► verify ─► ⏸ approval ─► deploy (env: production) ─► https://<project>.pages.dev
+ merge to main   ─► verify ─► ⏸ approval ─► deploy (env: production) ─► https://shift-planner.<subdomain>.workers.dev
+
+ Both sites sit behind Cloudflare Access (sign-in required), then the app's own login.
 ```
 
 The workflow is `.github/workflows/pipeline.yml`:
@@ -16,7 +18,8 @@ The workflow is `.github/workflows/pipeline.yml`:
   build. This job has **no access to any secret**.
 - **deploy** runs only on pushes to `staging` or `main`. It enters a GitHub
   Environment, which is the only way to get at that environment's secrets,
-  builds with that environment's config, and uploads to Cloudflare Pages.
+  builds with that environment's config, and uploads it as a Cloudflare
+  Worker (static files only; see `wrangler.jsonc`).
 
 ---
 
@@ -24,11 +27,11 @@ The workflow is `.github/workflows/pipeline.yml`:
 
 | Name | Kind | Stored in | How sensitive | Read by |
 |---|---|---|---|---|
-| `CLOUDFLARE_API_TOKEN` | **Secret** | GitHub → Environments → `staging` and `production` | **High.** Can deploy over your site | Only the "Deploy to Cloudflare Pages" step |
+| `CLOUDFLARE_API_TOKEN` | **Secret** | GitHub → Environments → `staging` and `production` | **High.** Can deploy over your site | Only the "Deploy to Cloudflare Workers" step |
 | `VITE_SUPABASE_ANON_KEY` | Secret | GitHub → Environments → each env (different value per env) | Low. Public by design (see §3) | Only the Build step |
 | `VITE_SUPABASE_URL` | Variable | GitHub → Environments → each env | Public | Build step |
 | `CLOUDFLARE_ACCOUNT_ID` | Variable | GitHub → Environments → each env | Not secret (an ID) | Deploy step |
-| `CLOUDFLARE_PAGES_PROJECT` | Variable | GitHub → repo-level **Variables** | Public | Turns deploys on |
+| `DEPLOY_ENABLED` | Variable (`true`) | GitHub → repo-level **Variables** | Public | Turns deploys on |
 | Supabase `service_role` / `sb_secret_…` key, DB password | **Never in GitHub, never in the front end** | Your password manager. The invite Edge Function gets the key from Supabase itself | **Critical.** Bypasses all security | Only the `invite-user` function, inside Supabase |
 | Local dev values | `.env` file on your machine (ignored by git) | Your laptop only | Use **staging** values only | `npm run dev` |
 
@@ -101,7 +104,7 @@ dependencies are a supply-chain risk.
    ```bash
    supabase link --project-ref <ref>
    supabase functions deploy invite-user
-   supabase secrets set ALLOWED_ORIGINS="https://staging.<project>.pages.dev"   # prod: https://<project>.pages.dev
+   supabase secrets set ALLOWED_ORIGINS="https://shift-planner-staging.<subdomain>.workers.dev"   # prod: https://shift-planner.<subdomain>.workers.dev
    ```
    The function gets the service-role key from Supabase automatically. It
    never touches GitHub or the browser.
@@ -111,26 +114,33 @@ dependencies are a supply-chain risk.
    From then on, invite everyone else from the app's **Users** tab.
 7. Note each project's URL and anon/publishable key (**Project Settings → API**).
 
-### c) Cloudflare Pages project
-1. Create the project once with production branch `main`. Either:
-   - dashboard: **Workers & Pages → Create → Pages → Upload assets** (upload
-     any file; the pipeline replaces it), or
-   - CLI: `npx wrangler pages project create shift-planner --production-branch=main`
-2. **Lock down staging:** project → **Settings → General → Enable access
-   policy**. Because `main` is the production branch, `staging` counts as a
-   preview. Its URL now requires a Cloudflare sign-in. Add teammates' emails
-   to the Access policy if others need to test.
-3. **Lock down production too:** Zero Trust → **Access → Applications → Add
-   an application → Self-hosted**. Set the domain to `<project>.pages.dev`
-   (and your custom domain, if you add one). Add an **Allow** policy with
-   **Emails** = your managers' addresses, and login method **One-time PIN**.
-   Then go back to the Pages project → Settings → General and select **Enable
-   access policy** again, so previews stay covered. This is free for up to 50
-   users.
+### c) Cloudflare Workers + Access
+Hosting is Cloudflare Workers serving static files. There's no project to
+create: the first deploy creates both Workers (`shift-planner-staging` and
+`shift-planner`).
+
+1. **Find your workers.dev subdomain:** Workers & Pages → the right-hand
+   panel shows `<subdomain>.workers.dev`. Your sites will be
+   `https://shift-planner-staging.<subdomain>.workers.dev` and `https://shift-planner.<subdomain>.workers.dev`.
+2. **Make every Worker private by default, before the first deploy.** Zero
+   Trust → Access → turn on Access for **all Workers in your account**. In the
+   policy, allow only your managers' emails, with login method **One-time PIN**.
+   Every Worker is then behind a sign-in from the moment it exists. It's free
+   for up to 50 users.
+   *Alternative:* after the first deploy, open each Worker → **Settings →
+   Domains & Routes → workers.dev → Enable Cloudflare Access**, then **Manage
+   Cloudflare Access** to set the email list. The site is public until you do
+   this.
+3. If you created a Worker by hand while exploring, delete it (Workers &
+   Pages → the Worker → Settings → Delete). If it was set up with Git,
+   also delete any repo it created in your GitHub.
 
 ### d) Cloudflare API token (least privilege)
 **My Profile → API Tokens → Create Token → Custom token**
-- Permissions: **Account → Cloudflare Pages → Edit**. Nothing else.
+- Permissions: **Account → Workers Scripts → Edit** and **Account → Account
+  Settings → Read**. Nothing else. If the first deploy fails with a
+  permissions error, recreate the token from the **Edit Cloudflare Workers**
+  template, which grants more than this pipeline needs.
 - Account resources: **Include → your account only**
 - Client IP filtering: leave blank (GitHub's runner IPs change)
 - **TTL:** set an end date about 90 days out, and add a calendar reminder to rotate it.
@@ -157,7 +167,7 @@ revoke them independently.
 
 ### f) Turn deploys on
 **Settings → Secrets and variables → Actions → Variables → New repository
-variable:** `CLOUDFLARE_PAGES_PROJECT` = your Pages project name. Until this
+variable:** `DEPLOY_ENABLED` = `true`. Until this
 exists, the pipeline only verifies and never deploys.
 
 ### g) Harden the repo
@@ -205,19 +215,19 @@ Supabase → Authentication → Users.
 ## 6. Day to day
 
 1. Push to `staging`. After about 2 minutes, test at
-   `https://staging.<project>.pages.dev`.
+   `https://shift-planner-staging.<subdomain>.workers.dev`.
 2. Open a PR from `staging` to `main`. CI must pass before you can merge.
 3. Merge. The production deploy waits for you. Go to **Actions → the run →
    Review deployments → Approve**.
-4. **Rollback:** Cloudflare → your Pages project → **Deployments** → choose an
-   earlier production deployment → **Rollback**. You can also `git revert` and
-   merge.
+4. **Rollback:** Cloudflare → Workers & Pages → `shift-planner` →
+   **Deployments** → pick an earlier version → **Rollback**. You can also
+   `git revert` and merge.
 
 ## 7. If a secret leaks
 
 - **Cloudflare token:** revoke it in Cloudflare (My Profile → API Tokens),
   create a new one, and update it in both GitHub environments. Then check the
-  Pages deployment history for anything you didn't push.
+  Workers' deployment history for anything you didn't push.
 - **Supabase service_role / secret key** (should never be anywhere near this
   repo): rotate it in Supabase → Project Settings → API immediately, and review
   the database for changes.
