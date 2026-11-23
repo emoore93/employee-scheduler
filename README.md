@@ -11,6 +11,7 @@ employee-scheduler/
 │  ├─ lib/api.ts           Supabase reads/writes
 │  ├─ pages/               Schedule, Employees, Time off, Store setup, Login
 │  └─ styles.css
+├─ wrangler.jsonc         Cloudflare Workers hosting config (staging + production)
 ├─ test/scheduler.test.ts  engine tests against the seed data
 ├─ .github/workflows/pipeline.yml   CI/CD (verify → staging / production)
 └─ docs/DEPLOYMENT.md      pipeline, secrets, setup checklist
@@ -22,7 +23,7 @@ employee-scheduler/
 |---|---|---|
 | Database + auth | **Supabase Free** (Postgres, email auth, RLS) | $0 |
 | Front end | **Vite + React + TypeScript**, built to static files | — |
-| Hosting | **Cloudflare Pages** (free, unlimited bandwidth, commercial use OK) | $0 |
+| Hosting | **Cloudflare Workers** static assets (free; static file requests aren't billed) | $0 |
 | Auto-scheduler | Runs **in the browser** — no server to pay for | $0 |
 | Custom domain (optional) | any registrar | ~$10/yr |
 
@@ -49,9 +50,10 @@ people in well under a second in the browser.
    migration and then the seed file. (These SQL files are kept separately
    from this front-end repo.) The seed can be re-run at any time: it wipes and
    rebuilds the demo store.
-3. **Lock down sign-ups.** Authentication → Sign In / Providers → turn off
-   "Allow new users to sign up". Then Authentication → Users → *Invite user*
-   for each manager. (In v1, every signed-in user is a manager with full access.)
+3. **Accounts and roles.** Turn off public sign-ups, deploy the `invite-user`
+   function, and make yourself admin. Everyone else gets invited from the
+   app's **Users** tab. Steps and the role table are in
+   [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 4. **Run locally**
    ```bash
    cp .env.example .env      # paste Project URL + anon key from Settings → API

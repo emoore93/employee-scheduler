@@ -14,9 +14,9 @@ import {
 const ROLE_RANK = (e: Employee) =>
   e.roles.includes('manager') ? 0 : e.roles.includes('shift_lead') ? 1 : 2;
 
-interface Props { storeId: string; storeName: string; data: StoreData }
+interface Props { storeId: string; storeName: string; data: StoreData; readOnly?: boolean }
 
-export default function SchedulePage({ storeId, storeName, data }: Props) {
+export default function SchedulePage({ storeId, storeName, data, readOnly = false }: Props) {
   const [weekStart, setWeekStart] = useState(() => mondayOf(todayLocal()));
   const [schedule, setSchedule] = useState<Schedule | null>(null);
   const [shifts, setShifts] = useState<Shift[]>([]);
@@ -31,9 +31,10 @@ export default function SchedulePage({ storeId, storeName, data }: Props) {
     try {
       const s = await getSchedule(storeId, weekStart);
       setSchedule(s);
-      setShifts(s ? await loadShifts(s.id) : []);
+      const visible = s && (!readOnly || s.status === 'published');
+      setShifts(visible ? await loadShifts(s.id) : []);
     } catch (e) { setErr((e as Error).message); }
-  }, [storeId, weekStart]);
+  }, [storeId, weekStart, readOnly]);
 
   useEffect(() => { load(); setLastRun(null); }, [load]);
 
@@ -130,24 +131,30 @@ export default function SchedulePage({ storeId, storeName, data }: Props) {
         <button onClick={() => setWeekStart(addDays(weekStart, 7))}>›</button>
         <h2>Week of {fmtDate(weekStart, false)} – {fmtDate(addDays(weekStart, 6), false)}</h2>
         {schedule && <span className={`badge ${schedule.status}`}>{schedule.status}</span>}
+        {readOnly && <span className="badge">view only</span>}
         <span className="spacer" />
-        <label className="check"><input type="checkbox" checked={keepExisting} onChange={e => setKeepExisting(e.target.checked)} /> keep current shifts</label>
-        <button className="primary" disabled={busy} onClick={generate}>✨ Auto-schedule</button>
-        <button disabled={busy} onClick={copyLastWeek}>Copy last week</button>
-        <button disabled={busy || !schedule} onClick={togglePublish}>{schedule?.status === 'published' ? 'Unpublish' : 'Publish'}</button>
-        <button disabled={busy || !shifts.length} onClick={clearWeek}>Clear</button>
+        {!readOnly && <>
+          <label className="check"><input type="checkbox" checked={keepExisting} onChange={e => setKeepExisting(e.target.checked)} /> keep current shifts</label>
+          <button className="primary" disabled={busy} onClick={generate}>✨ Auto-schedule</button>
+          <button disabled={busy} onClick={copyLastWeek}>Copy last week</button>
+          <button disabled={busy || !schedule} onClick={togglePublish}>{schedule?.status === 'published' ? 'Unpublish' : 'Publish'}</button>
+          <button disabled={busy || !shifts.length} onClick={clearWeek}>Clear</button>
+        </>}
         <button onClick={() => window.print()}>Print</button>
       </div>
       <h2 className="print-only">{storeName} Schedule — week of {fmtDate(weekStart, false)}</h2>
       {err && <div className="banner error">{err}</div>}
+      {readOnly && schedule?.status !== 'published' && (
+        <div className="banner">This week’s schedule hasn’t been published yet.</div>
+      )}
 
-      <div className="stats no-print">
+      {!readOnly && <div className="stats no-print">
         <Stat label="Coverage" value={`${analysis.stats.coveragePct}%`} warn={analysis.stats.coveragePct < 100} />
         <Stat label="Scheduled hours" value={totalHours.toFixed(1)} />
         <Stat label="Labor cost" value={money(laborCost)} />
         <Stat label="Rule violations" value={String(errorCount)} warn={errorCount > 0} />
         <Stat label="Warnings" value={String(analysis.issues.length - errorCount)} />
-      </div>
+      </div>}
 
       <div className="grid-wrap">
         <table className="grid">
@@ -173,19 +180,19 @@ export default function SchedulePage({ storeId, storeName, data }: Props) {
                     const mine = shifts.map((s, idx) => [s, idx] as const).filter(([s]) => s.employee_id === e.id && s.shift_date === d);
                     const note = cellNote(e, di);
                     return (
-                      <td key={d} className={`cell ${note?.cls ?? ''}`}
-                          onClick={() => !rules.days[di].closed && setEditing({
+                      <td key={d} className={`cell ${note?.cls ?? ''} ${readOnly ? 'ro' : ''}`}
+                          onClick={() => !readOnly && !rules.days[di].closed && setEditing({
                             employee_id: e.id, shift_date: d,
                             start_time: rules.days[di].open ? `${String(Math.floor(rules.days[di].open / 60)).padStart(2, '0')}:00:00` : '09:00:00',
                             end_time: '17:00:00', role: e.roles.includes('associate') ? 'associate' : e.roles[0], break_minutes: 30,
                           })}>
                         {mine.map(([s, idx]) => {
                           const iss = issuesByShift.get(idx);
-                          const sev = iss?.some(x => x.startsWith('⛔')) ? 'err' : iss ? 'warn' : '';
+                          const sev = readOnly ? '' : iss?.some(x => x.startsWith('⛔')) ? 'err' : iss ? 'warn' : '';
                           return (
                             <div key={s.id ?? idx} className={`chip ${sev}`} style={{ borderLeftColor: e.color ?? '#888' }}
-                                 title={iss?.join('\n')}
-                                 onClick={ev => { ev.stopPropagation(); setEditing(s); }}>
+                                 title={readOnly ? undefined : iss?.join('\n')}
+                                 onClick={ev => { ev.stopPropagation(); if (!readOnly) setEditing(s); }}>
                               {fmtTime(s.start_time)}–{fmtTime(s.end_time)}
                               {s.role && s.role !== 'associate' && <span className="role">{s.role.replace('_', ' ')}</span>}
                             </div>
@@ -200,7 +207,7 @@ export default function SchedulePage({ storeId, storeName, data }: Props) {
               );
             })}
           </tbody>
-          <tfoot className="no-print">
+          {!readOnly && <tfoot className="no-print">
             <tr>
               <td className="emp-col">Coverage</td>
               {dates.map((d, i) => {
@@ -216,11 +223,11 @@ export default function SchedulePage({ storeId, storeName, data }: Props) {
               })}
               <td />
             </tr>
-          </tfoot>
+          </tfoot>}
         </table>
       </div>
 
-      {analysis.issues.length > 0 && (
+      {!readOnly && analysis.issues.length > 0 && (
         <details className="issues no-print" open={errorCount > 0}>
           <summary>{analysis.issues.length} things to review</summary>
           <ul>

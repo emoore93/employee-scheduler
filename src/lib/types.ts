@@ -110,3 +110,13 @@ export interface Shift {
   break_minutes?: number;
   notes?: string | null;
 }
+
+export type AppRole = 'admin' | 'manager' | 'viewer';
+
+export interface AppUser {
+  user_id: string;
+  email: string;
+  role: AppRole;
+  created_at: string;
+  updated_at: string;
+}
